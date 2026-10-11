@@ -24,6 +24,14 @@ const maxCertificatesPerWeek = 40;
 const orderNotReadyRetryDelaysMs = [3000, 7000];
 const issuerVersion = "0.1.0";
 
+const memoryLogs = [];
+function log(...args) {
+  const line = `[${new Date().toISOString()}] ${args.map((a) => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ")}`;
+  console.log(line);
+  memoryLogs.push(line);
+  if (memoryLogs.length > 200) memoryLogs.shift();
+}
+
 const originalPollOrderStatus = ACME._pollOrderStatus;
 ACME._pollOrderStatus = function (me, options, kid, order, verifieds) {
   return retryOrderNotReady(() => originalPollOrderStatus.call(this, me, options, kid, order, verifieds));
@@ -362,21 +370,22 @@ async function waitForTxtRecord(name, value) {
 
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(name)}&type=TXT`);
-      if (res.ok) {
-        const json = await res.json();
-        const answers = json.Answer || [];
-        if (answers.some((a) => (a.data || "").replace(/^"|"$/g, "") === value)) {
-          console.log(`DNS challenge record confirmed visible globally via Google DNS for ${name}`);
-          return;
-        }
+      const [gRes, cfRes] = await Promise.all([
+        fetch(`https://dns.google/resolve?name=${encodeURIComponent(name)}&type=TXT`).then((r) => r.json()).catch(() => null),
+        fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=TXT`, { headers: { accept: "application/dns-json" } }).then((r) => r.json()).catch(() => null),
+      ]);
+      const gOk = (gRes?.Answer || []).some((a) => (a.data || "").replace(/^"|"$/g, "") === value);
+      const cfEdgeOk = (cfRes?.Answer || []).some((a) => (a.data || "").replace(/^"|"$/g, "") === value);
+      if (gOk && cfEdgeOk) {
+        log(`DNS challenge record confirmed visible globally for ${name}`);
+        return;
       }
     } catch {
       // transient network error, retry
     }
     await delay(4_000);
   }
-  console.log(`Warning: Google DNS didn't confirm record before deadline, continuing with Cloudflare validation`);
+  log(`Warning: Global DNS didn't confirm record before deadline, continuing anyway`);
 }
 
 let accountKeyPromise;
@@ -487,12 +496,26 @@ async function requestCertificate(config, csrPem) {
     await writeJsonAtomically(quotaPath, history);
 
     let issued;
-    try {
-      issued = await issueNewCertificate(config, identity.csrDer, identity.hostname);
-    } catch (error) {
+    let lastIssuanceError;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        issued = await issueNewCertificate(config, identity.csrDer, identity.hostname);
+        break;
+      } catch (error) {
+        lastIssuanceError = error;
+        log(`Issuance attempt ${attempt} failed: ${error.message}`);
+        if (attempt < 2 && /secondary validation/i.test(error.message)) {
+          log(`Retrying issuance in 15 seconds due to transient secondary validation...`);
+          await delay(15_000);
+        } else {
+          break;
+        }
+      }
+    }
+    if (!issued) {
       history.pop();
       await writeJsonAtomically(quotaPath, history);
-      throw error;
+      throw lastIssuanceError;
     }
 
     const cachePath = resolve(config.stateDirectory, "certificates", `${identity.fingerprint}.json`);
@@ -583,7 +606,7 @@ function createDns01Challenge(config) {
       recordIds.set(mapKey, record.id);
       try {
         await waitForTxtRecord(dnsHost, keyAuthorizationDigest);
-        await delay(30_000);
+        await delay(45_000);
       } catch (error) {
         await cloudflareRequest(config, "DELETE", `/zones/${config.cfZoneId}/dns_records/${record.id}`);
         recordIds.delete(mapKey);
@@ -612,7 +635,7 @@ function createDns01Challenge(config) {
       const recordId = recordIds.get(mapKey);
       if (recordId) {
         recordIds.delete(mapKey);
-        delay(45_000).then(() => {
+        delay(300_000).then(() => {
           cloudflareRequest(
             config,
             "DELETE",
@@ -693,6 +716,10 @@ export function createIssuerServer({ config, issueCertificate = (csr) => request
       } catch (err) {
         sendJson(response, 500, { error: err.message });
       }
+      return;
+    }
+    if (request.method === "GET" && request.url === "/v1/logs") {
+      sendJson(response, 200, { logs: memoryLogs });
       return;
     }
     if (request.method !== "POST" || request.url !== "/v1/issue") {
