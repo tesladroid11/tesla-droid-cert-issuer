@@ -19,6 +19,11 @@ const maxCertificatesPerWeek = 40;
 const orderNotReadyRetryDelaysMs = [3000, 7000];
 const issuerVersion = "0.1.0";
 
+const originalPollOrderStatus = ACME._pollOrderStatus;
+ACME._pollOrderStatus = function (me, options, kid, order, verifieds) {
+  return retryOrderNotReady(() => originalPollOrderStatus.call(this, me, options, kid, order, verifieds));
+};
+
 export function validateCsr(csrPem, domainSuffix) {
   if (typeof csrPem !== "string" || Buffer.byteLength(csrPem, "utf8") > maxBodyBytes) {
     throw Object.assign(new Error("CSR must be a PEM string no larger than 16 KB"), { statusCode: 400 });
@@ -387,9 +392,7 @@ async function issueNewCertificate(config, csrDer, hostname) {
     domains: [hostname],
     challenges: { "dns-01": challenge },
   };
-  const pems = await retryOrderNotReady(
-    () => acme.certificates.create(certificateOptions),
-  );
+  const pems = await acme.certificates.create(certificateOptions);
   const certificatePem = `${pems.cert.trim()}\n${pems.chain.trim()}\n`;
   const certificate = new X509Certificate(certificatePem);
   const expiresAt = Math.floor(Date.parse(certificate.validTo) / 1000);
