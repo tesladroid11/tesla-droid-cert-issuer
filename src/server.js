@@ -5,8 +5,13 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { Resolver, resolveTxt } from "node:dns/promises";
+import { createRequire } from "node:module";
 import * as asn1js from "asn1js";
 import ACME from "@root/acme";
+
+const require = createRequire(import.meta.url);
+const Enc = require("@root/encoding/base64");
+const U = require("@root/acme/utils.js");
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultStateDirectory = resolve(moduleDirectory, "../data");
@@ -22,6 +27,113 @@ const issuerVersion = "0.1.0";
 const originalPollOrderStatus = ACME._pollOrderStatus;
 ACME._pollOrderStatus = function (me, options, kid, order, verifieds) {
   return retryOrderNotReady(() => originalPollOrderStatus.call(this, me, options, kid, order, verifieds));
+};
+
+ACME._postChallenge = function (me, options, kid, auth) {
+  const RETRY_INTERVAL = me.retryInterval || 1000;
+  const DEAUTH_INTERVAL = me.deauthWait || 10 * 1000;
+  const MAX_POLL = me.retryPoll || 8;
+  const MAX_PEND = me.retryPending || 4;
+  let count = 0;
+  const altname = ACME._untame(auth.identifier.value, auth.wildcard);
+
+  function deactivate() {
+    return U._jwsRequest(me, {
+      accountKey: options.accountKey,
+      url: auth.url,
+      protected: { kid },
+      payload: Enc.strToBuf(JSON.stringify({ status: "deactivated" })),
+    }).then(() => ACME._wait(DEAUTH_INTERVAL));
+  }
+
+  function pollStatus() {
+    if (count >= MAX_POLL) {
+      const err = new Error(`[ACME.js] stuck in bad pending/processing state for '${altname}'`);
+      err.context = "present_challenge";
+      return Promise.reject(err);
+    }
+    count += 1;
+    return U._jwsRequest(me, {
+      accountKey: options.accountKey,
+      url: auth.url,
+      protected: { kid },
+      payload: Enc.binToBuf(""),
+    })
+      .then(checkResult)
+      .catch(transformError);
+  }
+
+  function checkResult(resp) {
+    ACME._notify(me, options, "challenge_status", {
+      status: resp.body.status,
+      type: auth.type,
+      altname,
+    });
+
+    if (resp.body.status === "processing") {
+      return ACME._wait(RETRY_INTERVAL).then(pollStatus);
+    }
+
+    if (resp.body.status === "pending") {
+      if (count >= MAX_PEND) {
+        return ACME._wait(RETRY_INTERVAL)
+          .then(deactivate)
+          .then(respondToChallenge);
+      }
+      // Poll with POST-as-GET instead of resending POST {}
+      return ACME._wait(RETRY_INTERVAL).then(pollStatus);
+    }
+
+    try {
+      options.challenges[auth.type]
+        .remove({ challenge: auth })
+        .catch((err) => {
+          err.action = "challenge_remove";
+          err.altname = auth.altname;
+          err.type = auth.type;
+          ACME._notify(me, options, "error", err);
+        });
+    } catch {}
+
+    if (resp.body.status === "valid") {
+      return resp.body;
+    }
+
+    let errmsg;
+    if (!resp.body.status) {
+      errmsg = `[ACME.js] (E_STATE_EMPTY) empty challenge state for '${altname}':${JSON.stringify(resp.body)}`;
+    } else if (resp.body.status === "invalid") {
+      errmsg = `[ACME.js] (E_STATE_INVALID) challenge state for '${altname}': '${JSON.stringify(resp.body)}'`;
+    } else {
+      errmsg = `[ACME.js] (E_STATE_UKN) challenge state for '${altname}': '${resp.body.status}'`;
+    }
+    return Promise.reject(new Error(errmsg));
+  }
+
+  function transformError(e) {
+    let err = e;
+    if (err.urn) {
+      err = new Error(`[acme-v2] ${auth.altname} status:${e.status} ${e.detail}`);
+      err.auth = auth;
+      err.altname = auth.altname;
+      err.type = auth.type;
+      err.code = e.status === "invalid" ? "E_ACME_CHALLENGE" : "E_ACME_UNKNOWN";
+    }
+    throw err;
+  }
+
+  function respondToChallenge() {
+    return U._jwsRequest(me, {
+      accountKey: options.accountKey,
+      url: auth.url,
+      protected: { kid },
+      payload: Enc.strToBuf(JSON.stringify({})),
+    })
+      .then(checkResult)
+      .catch(transformError);
+  }
+
+  return respondToChallenge();
 };
 
 export function validateCsr(csrPem, domainSuffix) {
