@@ -735,6 +735,7 @@ export async function ensureInfrastructureDns(config) {
     return { skipped: "no_cf_credentials" };
   }
   const records = await cloudflareRequest(config, "GET", `/zones/${config.cfZoneId}/dns_records?per_page=100`);
+  const dnssec = await cloudflareRequest(config, "GET", `/zones/${config.cfZoneId}/dnssec`).catch((e) => ({ error: e.message }));
   const actions = [];
 
   const wildcardName = `*.${config.domainSuffix}`;
@@ -779,6 +780,7 @@ export async function ensureInfrastructureDns(config) {
 
   return {
     actions,
+    dnssec,
     existing: records.map((r) => ({ name: r.name, type: r.type, content: r.content })),
   };
 }
