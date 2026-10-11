@@ -560,6 +560,7 @@ function createDns01Challenge(config) {
       recordIds.set(mapKey, record.id);
       try {
         await waitForTxtRecord(dnsHost, keyAuthorizationDigest);
+        await delay(12_000);
       } catch (error) {
         await cloudflareRequest(config, "DELETE", `/zones/${config.cfZoneId}/dns_records/${record.id}`);
         recordIds.delete(mapKey);
