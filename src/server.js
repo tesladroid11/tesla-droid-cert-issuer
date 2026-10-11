@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { createHash, createPublicKey, generateKeyPairSync, randomUUID, verify, X509Certificate } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, randomUUID, sign, verify, X509Certificate } from "node:crypto";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
