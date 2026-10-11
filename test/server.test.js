@@ -13,8 +13,8 @@ const require = createRequire(import.meta.url);
 const acme = require("@root/acme");
 const acmeCsr = require("@root/csr");
 
-function makeCsrPem(nameOverride) {
-  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+function makeCsrPem(nameOverride, keyPair) {
+  const { privateKey, publicKey } = keyPair || generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   const spkiBytes = publicKey.export({ format: "der", type: "spki" });
   const hostname = nameOverride || `${createHash("sha256").update(spkiBytes).digest("hex").slice(0, 32)}.car.tesla-droid.app`;
   const spki = asn1js.fromBER(toArrayBuffer(spkiBytes)).result;
@@ -214,3 +214,57 @@ test("uses the trusted proxy client IP for rate limiting when enabled", async (t
   assert.equal(limited.status, 429);
   assert.deepEqual(await limited.json(), { error: "rate_limit_exceeded" });
 });
+
+test("supports 6.0 ATTD challenge, enroll and status protocol with 16-hex name", async (t) => {
+  let enrollCalledWith = null;
+  const server = createIssuerServer({
+    config: { maxRequestsPerWindow: 10, domainSuffix: "car.tesla-droid.app" },
+    issueCertificate: async (csr) => {
+      enrollCalledWith = csr;
+      return { cert: "cert_pem_data", name: "16hexdevice.car.tesla-droid.app", expires_at: 1793456000 };
+    },
+  });
+  const baseUrl = await listen(server);
+  t.after(() => server.close());
+
+  // 1. challenge
+  const challengeRes = await fetch(`${baseUrl}/v1/challenge`);
+  assert.equal(challengeRes.status, 200);
+  const challengeBody = await challengeRes.json();
+  assert.match(challengeBody.nonce, /^[0-9a-f]{32}$/);
+
+  // 2. enroll with 16-hex name and 6.0 extra fields
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const spkiBytes = publicKey.export({ format: "der", type: "spki" });
+  const hostname16 = `${createHash("sha256").update(spkiBytes).digest("hex").slice(0, 16)}.car.tesla-droid.app`;
+  const csr16 = makeCsrPem(hostname16, { privateKey, publicKey });
+
+  const enrollRes = await fetch(`${baseUrl}/v1/enroll`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      csr: csr16,
+      nonce: challengeBody.nonce,
+      version_code: 263,
+      drm_id: "test_drm",
+      model: "Mi 10",
+      android_id: "test_android",
+    }),
+  });
+  assert.equal(enrollRes.status, 200);
+  const enrollBody = await enrollRes.json();
+  assert.equal(enrollBody.cert, "cert_pem_data");
+  assert.equal(enrollBody.name, "16hexdevice.car.tesla-droid.app");
+  assert.equal(enrollBody.expires_at, 1793456000);
+  assert.equal(enrollCalledWith, csr16);
+
+  // 3. status
+  const statusRes = await fetch(`${baseUrl}/v1/status`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "streaming" }),
+  });
+  assert.equal(statusRes.status, 200);
+  assert.deepEqual(await statusRes.json(), { status: "ok" });
+});
+

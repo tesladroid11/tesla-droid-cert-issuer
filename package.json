@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@root/acme": "^3.1.0",
-    "asn1js": "^3.0.10"
+    "asn1js": "^3.0.10",
+    "node-forge": "^1.4.0"
   }
 }

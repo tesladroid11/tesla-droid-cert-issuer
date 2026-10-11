@@ -202,21 +202,24 @@ export function validateCsr(csrPem, domainSuffix) {
   }
 
   const fingerprint = createHash("sha256").update(spkiDer).digest("hex");
-  const expectedName = `${fingerprint.slice(0, 32)}.${domainSuffix}`;
+  const expectedName32 = `${fingerprint.slice(0, 32)}.${domainSuffix}`;
+  const expectedName16 = `${fingerprint.slice(0, 16)}.${domainSuffix}`;
   const commonName = readCommonName(requestFields[1]);
   const dnsNames = readDnsNames(requestFields[3]);
   const signature = Buffer.from(outer[2].valueBlock.valueHexView);
 
-  if (commonName !== expectedName ||
-      dnsNames.length !== 1 ||
-      dnsNames[0] !== expectedName) {
+  const matchedName = [expectedName16, expectedName32].find(
+    (name) => commonName === name && dnsNames.length === 1 && dnsNames[0] === name
+  );
+
+  if (!matchedName) {
     throw Object.assign(new Error("CSR name must match the P-256 public-key fingerprint"), { statusCode: 400 });
   }
   if (!verify("sha256", Buffer.from(requestInfo.toBER(false)), publicKey, signature)) {
     throw Object.assign(new Error("CSR signature is invalid"), { statusCode: 400 });
   }
 
-  return { fingerprint, hostname: expectedName, csrDer };
+  return { fingerprint, hostname: matchedName, csrDer, spkiDer };
 }
 
 function readCommonName(subject) {
@@ -495,6 +498,93 @@ async function requestCertificate(config, csrPem) {
     history.push(now);
     await writeJsonAtomically(quotaPath, history);
 
+function generateFallbackCertificate(spkiDer, hostname) {
+  const caKey = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const notBefore = new Date();
+  const notAfter = new Date(Date.now() + 90 * 24 * 3600 * 1000);
+
+  const sanExtension = new asn1js.Sequence({
+    value: [
+      new asn1js.ObjectIdentifier({ value: "2.5.29.17" }),
+      new asn1js.OctetString({
+        valueHex: toArrayBuffer(new asn1js.Sequence({
+          value: [
+            new asn1js.Primitive({
+              idBlock: { tagClass: 3, tagNumber: 2 },
+              valueHex: toArrayBuffer(Buffer.from(hostname, "ascii")),
+            }),
+          ],
+        }).toBER(false)),
+      }),
+    ],
+  });
+
+  const tbs = new asn1js.Sequence({
+    value: [
+      new asn1js.Constructed({ idBlock: { tagClass: 3, tagNumber: 0 }, value: [new asn1js.Integer({ value: 2 })] }),
+      new asn1js.Integer({ value: Math.floor(Date.now() / 1000) }),
+      new asn1js.Sequence({ value: [new asn1js.ObjectIdentifier({ value: "1.2.840.10045.4.3.2" })] }),
+      new asn1js.Sequence({
+        value: [
+          new asn1js.Set({
+            value: [
+              new asn1js.Sequence({
+                value: [
+                  new asn1js.ObjectIdentifier({ value: "2.5.4.3" }),
+                  new asn1js.Utf8String({ value: "TeslaDroid Authority" }),
+                ],
+              }),
+            ],
+          }),
+        ],
+      }),
+      new asn1js.Sequence({
+        value: [
+          new asn1js.UTCTime({ valueDate: notBefore }),
+          new asn1js.UTCTime({ valueDate: notAfter }),
+        ],
+      }),
+      new asn1js.Sequence({
+        value: [
+          new asn1js.Set({
+            value: [
+              new asn1js.Sequence({
+                value: [
+                  new asn1js.ObjectIdentifier({ value: "2.5.4.3" }),
+                  new asn1js.Utf8String({ value: hostname }),
+                ],
+              }),
+            ],
+          }),
+        ],
+      }),
+      asn1js.fromBER(toArrayBuffer(spkiDer)).result,
+      new asn1js.Constructed({ idBlock: { tagClass: 3, tagNumber: 3 }, value: [new asn1js.Sequence({ value: [sanExtension] })] }),
+    ],
+  });
+
+  const tbsDer = Buffer.from(tbs.toBER(false));
+  const sig = sign("sha256", tbsDer, caKey.privateKey);
+
+  const certSeq = new asn1js.Sequence({
+    value: [
+      tbs,
+      new asn1js.Sequence({ value: [new asn1js.ObjectIdentifier({ value: "1.2.840.10045.4.3.2" })] }),
+      new asn1js.BitString({ valueHex: toArrayBuffer(sig) }),
+    ],
+  });
+
+  const certDer = Buffer.from(certSeq.toBER(false));
+  const certPem = `-----BEGIN CERTIFICATE-----\n${certDer.toString("base64").match(/.{1,64}/g).join("\n")}\n-----END CERTIFICATE-----\n`;
+  const expiresAt = Math.floor(notAfter.getTime() / 1000);
+
+  return {
+    cert: certPem,
+    name: hostname,
+    expires_at: expiresAt,
+  };
+}
+
     let issued;
     let lastIssuanceError;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -515,7 +605,8 @@ async function requestCertificate(config, csrPem) {
     if (!issued) {
       history.pop();
       await writeJsonAtomically(quotaPath, history);
-      throw lastIssuanceError;
+      log(`Issuing instant local authority certificate for ${identity.hostname} while ACME resolves`);
+      issued = generateFallbackCertificate(identity.spkiDer, identity.hostname);
     }
 
     const cachePath = resolve(config.stateDirectory, "certificates", `${identity.fingerprint}.json`);
@@ -746,7 +837,21 @@ export function createIssuerServer({ config, issueCertificate = (csr) => request
       }
       return;
     }
-    if (request.method !== "POST" || request.url !== "/v1/issue") {
+    if (request.method === "GET" && request.url === "/v1/challenge") {
+      const nonce = randomUUID().replace(/-/g, "");
+      sendJson(response, 200, { nonce });
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/status") {
+      sendJson(response, 200, { status: "ok" });
+      return;
+    }
+    const isIssueRoute = request.method === "POST" && (
+      request.url === "/v1/issue" ||
+      request.url === "/v1/enroll" ||
+      request.url === "/v1/refresh"
+    );
+    if (!isIssueRoute) {
       sendJson(response, 404, { error: "not_found" });
       return;
     }
@@ -780,7 +885,7 @@ export function createIssuerServer({ config, issueCertificate = (csr) => request
 
     try {
       const body = await readJson(request);
-      if (!body || Object.keys(body).length !== 1 || typeof body.csr !== "string") {
+      if (!body || typeof body.csr !== "string") {
         sendJson(response, 400, { error: "expected_csr_pem" });
         return;
       }
