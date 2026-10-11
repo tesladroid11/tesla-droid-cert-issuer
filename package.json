@@ -1,0 +1,16 @@
+{
+  "name": "tesla-droid-cert-issuer",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.9.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@root/acme": "^3.1.0",
+    "asn1js": "^3.0.10"
+  }
+}
