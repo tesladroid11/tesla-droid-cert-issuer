@@ -588,12 +588,14 @@ function createDns01Challenge(config) {
       const mapKey = `${dnsHost}:${keyAuthorizationDigest}`;
       const recordId = recordIds.get(mapKey);
       if (recordId) {
-        await cloudflareRequest(
-          config,
-          "DELETE",
-          `/zones/${config.cfZoneId}/dns_records/${recordId}`,
-        );
         recordIds.delete(mapKey);
+        delay(45_000).then(() => {
+          cloudflareRequest(
+            config,
+            "DELETE",
+            `/zones/${config.cfZoneId}/dns_records/${recordId}`,
+          ).catch((e) => console.error("Delayed DNS record cleanup warning:", e.message));
+        });
       }
     },
   };
