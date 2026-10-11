@@ -341,7 +341,7 @@ async function waitForTxtRecord(name, value) {
   const deadline = Date.now() + 180_000;
   let lastError;
   const resolver = new Resolver();
-  resolver.setServers(["1.1.1.1", "1.0.0.1"]);
+  resolver.setServers(["162.159.44.192", "173.245.58.192", "1.1.1.1"]);
   while (Date.now() < deadline) {
     try {
       const records = await resolver.resolveTxt(name);
@@ -560,7 +560,7 @@ function createDns01Challenge(config) {
       recordIds.set(mapKey, record.id);
       try {
         await waitForTxtRecord(dnsHost, keyAuthorizationDigest);
-        await delay(12_000);
+        await delay(20_000);
       } catch (error) {
         await cloudflareRequest(config, "DELETE", `/zones/${config.cfZoneId}/dns_records/${record.id}`);
         recordIds.delete(mapKey);
