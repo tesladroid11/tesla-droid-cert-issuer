@@ -268,3 +268,18 @@ test("supports 6.0 ATTD challenge, enroll and status protocol with 16-hex name",
   assert.deepEqual(await statusRes.json(), { status: "ok" });
 });
 
+test("accepts raw base64 DER CSR without PEM header markers", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const spkiBytes = publicKey.export({ format: "der", type: "spki" });
+  const hostname16 = `${createHash("sha256").update(spkiBytes).digest("hex").slice(0, 16)}.car.tesla-droid.app`;
+  const csr16Pem = makeCsrPem(hostname16, { privateKey, publicKey });
+  const rawBase64Csr = csr16Pem
+    .replace(/-----BEGIN CERTIFICATE REQUEST-----/, "")
+    .replace(/-----END CERTIFICATE REQUEST-----/, "")
+    .replace(/\s+/g, "");
+
+  const validated = validateCsr(rawBase64Csr, "car.tesla-droid.app");
+  assert.equal(validated.hostname, hostname16);
+});
+
+

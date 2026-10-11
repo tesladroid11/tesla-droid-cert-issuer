@@ -146,21 +146,25 @@ ACME._postChallenge = function (me, options, kid, auth) {
 
 export function validateCsr(csrPem, domainSuffix) {
   if (typeof csrPem !== "string" || Buffer.byteLength(csrPem, "utf8") > maxBodyBytes) {
-    throw Object.assign(new Error("CSR must be a PEM string no larger than 16 KB"), { statusCode: 400 });
-  }
-
-  const pemMatch = csrPem.match(
-    /^\s*-----BEGIN CERTIFICATE REQUEST-----\s*([A-Za-z0-9+/=\s]+)-----END CERTIFICATE REQUEST-----\s*$/,
-  );
-  if (!pemMatch) {
-    throw Object.assign(new Error("CSR is not valid PEM"), { statusCode: 400 });
+    throw Object.assign(new Error("CSR must be a string no larger than 16 KB"), { statusCode: 400 });
   }
 
   let csrDer;
-  try {
-    csrDer = Buffer.from(pemMatch[1].replace(/\s/g, ""), "base64");
-  } catch {
-    throw Object.assign(new Error("CSR is not valid base64"), { statusCode: 400 });
+  const pemMatch = csrPem.match(
+    /-----BEGIN CERTIFICATE REQUEST-----\s*([A-Za-z0-9+/=\s]+)-----END CERTIFICATE REQUEST-----/,
+  );
+  if (pemMatch) {
+    try {
+      csrDer = Buffer.from(pemMatch[1].replace(/\s/g, ""), "base64");
+    } catch {
+      throw Object.assign(new Error("CSR is not valid base64"), { statusCode: 400 });
+    }
+  } else {
+    try {
+      csrDer = Buffer.from(csrPem.trim().replace(/\s/g, ""), "base64");
+    } catch {
+      throw Object.assign(new Error("CSR is not valid base64"), { statusCode: 400 });
+    }
   }
 
   const parsed = asn1js.fromBER(toArrayBuffer(csrDer));
@@ -910,6 +914,8 @@ export function createIssuerServer({ config, issueCertificate = (csr) => request
       const statusCode = error.statusCode || 502;
       if (statusCode >= 500) {
         console.error("Certificate issuance failed:", error.stack || error.message);
+      } else if (statusCode === 400) {
+        console.warn("CSR validation failed:", error.message);
       }
       sendJson(response, statusCode, {
         error: statusCode === 413
