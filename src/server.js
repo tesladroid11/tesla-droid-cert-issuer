@@ -90,7 +90,7 @@ export function validateCsr(csrPem, domainSuffix) {
     throw Object.assign(new Error("CSR signature is invalid"), { statusCode: 400 });
   }
 
-  return { fingerprint, hostname: expectedName };
+  return { fingerprint, hostname: expectedName, csrDer };
 }
 
 function readCommonName(subject) {
@@ -344,7 +344,7 @@ async function requestCertificate(config, csrPem) {
 
     let issued;
     try {
-      issued = await issueNewCertificate(config, csrPem, identity.hostname);
+      issued = await issueNewCertificate(config, identity.csrDer, identity.hostname);
     } catch (error) {
       history.pop();
       await writeJsonAtomically(quotaPath, history);
@@ -357,7 +357,7 @@ async function requestCertificate(config, csrPem) {
   });
 }
 
-async function issueNewCertificate(config, csrPem, hostname) {
+async function issueNewCertificate(config, csrDer, hostname) {
   const accountKey = await loadOrCreateAccountKey(config.stateDirectory);
   const acme = ACME.create({
     maintainerEmail: config.acmeEmail,
@@ -379,7 +379,7 @@ async function issueNewCertificate(config, csrPem, hostname) {
   const pems = await acme.certificates.create({
     account,
     accountKey,
-    csr: csrPem,
+    csr: csrDer,
     domains: [hostname],
     challenges: { "dns-01": challenge },
   });

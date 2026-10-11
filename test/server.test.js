@@ -9,7 +9,9 @@ import test from "node:test";
 import * as asn1js from "asn1js";
 import { createIssuerServer, loadOrCreateAccountKey, validateCsr } from "../src/server.js";
 
-const acmeCsr = createRequire(import.meta.url)("@root/csr");
+const require = createRequire(import.meta.url);
+const acme = require("@root/acme");
+const acmeCsr = require("@root/csr");
 
 function makeCsrPem(nameOverride) {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
@@ -92,12 +94,17 @@ async function listen(server) {
 test("accepts a signed P-256 CSR bound to its fingerprint-derived DNS name", () => {
   const csr = makeCsrPem();
   const result = validateCsr(csr, "car.tesla-droid.app");
-  const acmeParsed = acmeCsr._info(csr);
+  const acmeParsed = acmeCsr._info(result.csrDer);
 
   assert.match(result.fingerprint, /^[0-9a-f]{64}$/);
   assert.equal(result.hostname, `${result.fingerprint.slice(0, 32)}.car.tesla-droid.app`);
+  assert.ok(Buffer.isBuffer(result.csrDer));
   assert.equal(acmeParsed.subject, result.hostname);
   assert.deepEqual(acmeParsed.altnames, [result.hostname]);
+  assert.equal(
+    acme._csrToUrlBase64(result.csrDer),
+    result.csrDer.toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_"),
+  );
 });
 
 test("rejects a signed CSR whose name does not match its public key", () => {
