@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { resolveTxt } from "node:dns/promises";
+import { Resolver, resolveTxt } from "node:dns/promises";
 import * as asn1js from "asn1js";
 import ACME from "@root/acme";
 
@@ -214,7 +214,8 @@ async function cloudflareRequest(config, method, path, body) {
   });
   const result = await response.json();
   if (!response.ok || !result.success) {
-    throw new Error(`Cloudflare DNS request failed with HTTP ${response.status}`);
+    const errorDetails = result.errors?.map((e) => `${e.code}: ${e.message}`).join(", ") || response.statusText;
+    throw new Error(`Cloudflare DNS request failed with HTTP ${response.status}: ${errorDetails}`);
   }
   return result.result;
 }
@@ -222,9 +223,11 @@ async function cloudflareRequest(config, method, path, body) {
 async function waitForTxtRecord(name, value) {
   const deadline = Date.now() + 180_000;
   let lastError;
+  const resolver = new Resolver();
+  resolver.setServers(["1.1.1.1", "1.0.0.1"]);
   while (Date.now() < deadline) {
     try {
-      const records = await resolveTxt(name);
+      const records = await resolver.resolveTxt(name);
       if (records.some((chunks) => chunks.join("") === value)) {
         return;
       }
@@ -594,6 +597,7 @@ export function createIssuerServer({ config, issueCertificate = (csr) => request
             : statusCode === 429
               ? "rate_limit_exceeded"
               : "certificate_issuance_failed",
+        ...(statusCode >= 500 && error.message ? { detail: error.message } : {}),
       });
     }
   });
