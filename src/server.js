@@ -827,7 +827,7 @@ export function createIssuerServer({ config, issueCertificate = (csr) => request
       return;
     }
     if (request.method === "POST" && request.url === "/v1/status") {
-      sendJson(response, 200, { status: "ok" });
+      sendJson(response, 200, { ok: true, status: "ok" });
       return;
     }
     const isIssueRoute = request.method === "POST" && (

@@ -265,7 +265,7 @@ test("supports 6.0 ATTD challenge, enroll and status protocol with 16-hex name",
     body: JSON.stringify({ status: "streaming" }),
   });
   assert.equal(statusRes.status, 200);
-  assert.deepEqual(await statusRes.json(), { status: "ok" });
+  assert.deepEqual(await statusRes.json(), { ok: true, status: "ok" });
 });
 
 test("accepts raw base64 DER CSR without PEM header markers", async () => {
