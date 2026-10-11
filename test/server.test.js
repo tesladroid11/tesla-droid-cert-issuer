@@ -133,10 +133,11 @@ test("retries ACME orderNotReady responses with bounded backoff", async () => {
   const result = await retryOrderNotReady(async () => {
     attempts += 1;
     if (attempts < 3) {
-      const error = new Error("order is still processing");
-      error.status = 403;
-      error.detail = "urn:ietf:params:acme:error:orderNotReady";
-      throw error;
+      throw new Error(
+        "Didn't finalize order: Unhandled status '403'. " +
+        '{"type":"urn:ietf:params:acme:error:orderNotReady",' +
+        '"detail":"Order status is processing"}',
+      );
     }
     return "issued";
   }, async (duration) => waits.push(duration));

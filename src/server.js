@@ -401,8 +401,9 @@ async function issueNewCertificate(config, csrDer, hostname) {
 }
 
 function isOrderNotReadyError(error) {
-  return error.status === 403 &&
-    /urn:ietf:params:acme:error:orderNotReady/i.test(`${error.detail || ""} ${error.message || ""}`);
+  return /urn:ietf:params:acme:error:orderNotReady/i.test(
+    `${error.detail || ""} ${error.message || ""}`,
+  );
 }
 
 export async function retryOrderNotReady(operation, wait = delay) {
