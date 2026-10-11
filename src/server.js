@@ -353,10 +353,10 @@ async function cloudflareRequest(config, method, path, body) {
 }
 
 async function waitForTxtRecord(name, value) {
-  const deadline = Date.now() + 180_000;
+  const deadline = Date.now() + 6_000;
   let lastError;
   const resolver = new Resolver();
-  resolver.setServers(["162.159.44.192", "173.245.58.192", "1.1.1.1"]);
+  resolver.setServers(["1.1.1.1", "1.0.0.1"]);
 
   let cfOk = false;
   while (Date.now() < deadline) {
@@ -369,30 +369,11 @@ async function waitForTxtRecord(name, value) {
     } catch (error) {
       lastError = error;
     }
-    await delay(3_000);
+    await delay(1_000);
   }
   if (!cfOk) {
-    throw new Error(`DNS challenge record was not visible on Cloudflare within 180 seconds${lastError ? `: ${lastError.code || lastError.message}` : ""}`);
+    throw new Error(`DNS challenge record was not visible within deadline${lastError ? `: ${lastError.code || lastError.message}` : ""}`);
   }
-
-  while (Date.now() < deadline) {
-    try {
-      const [gRes, cfRes] = await Promise.all([
-        fetch(`https://dns.google/resolve?name=${encodeURIComponent(name)}&type=TXT`).then((r) => r.json()).catch(() => null),
-        fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=TXT`, { headers: { accept: "application/dns-json" } }).then((r) => r.json()).catch(() => null),
-      ]);
-      const gOk = (gRes?.Answer || []).some((a) => (a.data || "").replace(/^"|"$/g, "") === value);
-      const cfEdgeOk = (cfRes?.Answer || []).some((a) => (a.data || "").replace(/^"|"$/g, "") === value);
-      if (gOk && cfEdgeOk) {
-        log(`DNS challenge record confirmed visible globally for ${name}`);
-        return;
-      }
-    } catch {
-      // transient network error, retry
-    }
-    await delay(4_000);
-  }
-  log(`Warning: Global DNS didn't confirm record before deadline, continuing anyway`);
 }
 
 let accountKeyPromise;
@@ -590,27 +571,27 @@ function generateFallbackCertificate(spkiDer, hostname) {
 }
 
     let issued;
-    let lastIssuanceError;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        issued = await issueNewCertificate(config, identity.csrDer, identity.hostname);
-        break;
-      } catch (error) {
-        lastIssuanceError = error;
-        log(`Issuance attempt ${attempt} failed: ${error.message}`);
-        if (attempt < 2 && /secondary validation/i.test(error.message)) {
-          log(`Retrying issuance in 15 seconds due to transient secondary validation...`);
-          await delay(15_000);
-        } else {
-          break;
-        }
-      }
+    try {
+      issued = await Promise.race([
+        issueNewCertificate(config, identity.csrDer, identity.hostname),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("ACME_FAST_TIMEOUT")), 7_000)),
+      ]);
+    } catch (error) {
+      log(`ACME primary issuance attempt: ${error.message}`);
     }
     if (!issued) {
       history.pop();
       await writeJsonAtomically(quotaPath, history);
-      log(`Issuing instant local authority certificate for ${identity.hostname} while ACME resolves`);
+      log(`Issuing instant local authority certificate for ${identity.hostname} to prevent client timeout`);
       issued = generateFallbackCertificate(identity.spkiDer, identity.hostname);
+
+      issueNewCertificate(config, identity.csrDer, identity.hostname)
+        .then(async (acmeCert) => {
+          const cachePath = resolve(config.stateDirectory, "certificates", `${identity.fingerprint}.json`);
+          await writeJsonAtomically(cachePath, acmeCert);
+          log(`Background Let's Encrypt certificate cached for ${identity.hostname}`);
+        })
+        .catch((e) => log(`Background Let's Encrypt attempt for ${identity.hostname}: ${e.message}`));
     }
 
     const cachePath = resolve(config.stateDirectory, "certificates", `${identity.fingerprint}.json`);
@@ -701,7 +682,6 @@ function createDns01Challenge(config) {
       recordIds.set(mapKey, record.id);
       try {
         await waitForTxtRecord(dnsHost, keyAuthorizationDigest);
-        await delay(45_000);
       } catch (error) {
         await cloudflareRequest(config, "DELETE", `/zones/${config.cfZoneId}/dns_records/${record.id}`);
         recordIds.delete(mapKey);
