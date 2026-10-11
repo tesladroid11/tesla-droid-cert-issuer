@@ -15,7 +15,7 @@ const U = require("@root/acme/utils.js");
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultStateDirectory = resolve(moduleDirectory, "../data");
-const stagingDirectoryUrl = "https://acme-staging-v02.api.letsencrypt.org/directory";
+const defaultDirectoryUrl = "https://acme-v02.api.letsencrypt.org/directory";
 const maxBodyBytes = 16 * 1024;
 const rateLimitWindowMs = 60 * 60 * 1000;
 const certificateLimitWindowMs = 7 * 24 * 60 * 60 * 1000;
@@ -306,7 +306,7 @@ function readConfig(env) {
 
   return {
     acmeEmail: env.ACME_EMAIL,
-    acmeDirectoryUrl: env.ACME_DIRECTORY_URL || stagingDirectoryUrl,
+    acmeDirectoryUrl: env.ACME_DIRECTORY_URL || defaultDirectoryUrl,
     cfDnsApiToken: env.CF_DNS_API_TOKEN,
     cfZoneId: env.CF_ZONE_ID,
     cfZoneName,
