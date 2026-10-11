@@ -342,18 +342,41 @@ async function waitForTxtRecord(name, value) {
   let lastError;
   const resolver = new Resolver();
   resolver.setServers(["162.159.44.192", "173.245.58.192", "1.1.1.1"]);
+
+  let cfOk = false;
   while (Date.now() < deadline) {
     try {
       const records = await resolver.resolveTxt(name);
       if (records.some((chunks) => chunks.join("") === value)) {
-        return;
+        cfOk = true;
+        break;
       }
     } catch (error) {
       lastError = error;
     }
     await delay(3_000);
   }
-  throw new Error(`DNS challenge record was not visible within 180 seconds${lastError ? `: ${lastError.code || lastError.message}` : ""}`);
+  if (!cfOk) {
+    throw new Error(`DNS challenge record was not visible on Cloudflare within 180 seconds${lastError ? `: ${lastError.code || lastError.message}` : ""}`);
+  }
+
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(name)}&type=TXT`);
+      if (res.ok) {
+        const json = await res.json();
+        const answers = json.Answer || [];
+        if (answers.some((a) => (a.data || "").replace(/^"|"$/g, "") === value)) {
+          console.log(`DNS challenge record confirmed visible globally via Google DNS for ${name}`);
+          return;
+        }
+      }
+    } catch {
+      // transient network error, retry
+    }
+    await delay(4_000);
+  }
+  console.log(`Warning: Google DNS didn't confirm record before deadline, continuing with Cloudflare validation`);
 }
 
 let accountKeyPromise;
@@ -560,7 +583,7 @@ function createDns01Challenge(config) {
       recordIds.set(mapKey, record.id);
       try {
         await waitForTxtRecord(dnsHost, keyAuthorizationDigest);
-        await delay(20_000);
+        await delay(30_000);
       } catch (error) {
         await cloudflareRequest(config, "DELETE", `/zones/${config.cfZoneId}/dns_records/${record.id}`);
         recordIds.delete(mapKey);
