@@ -777,7 +777,10 @@ export async function ensureInfrastructureDns(config) {
     });
   }
 
-  return actions;
+  return {
+    actions,
+    existing: records.map((r) => ({ name: r.name, type: r.type, content: r.content })),
+  };
 }
 
 export function startServer(env = process.env) {
