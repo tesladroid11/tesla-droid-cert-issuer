@@ -647,6 +647,15 @@ export function createIssuerServer({ config, issueCertificate = (csr) => request
       sendJson(response, 200, { status: "ok" });
       return;
     }
+    if (request.method === "POST" && request.url === "/v1/init-dns") {
+      try {
+        const results = await ensureInfrastructureDns(config);
+        sendJson(response, 200, { status: "dns_configured", results });
+      } catch (err) {
+        sendJson(response, 500, { error: err.message });
+      }
+      return;
+    }
     if (request.method !== "POST" || request.url !== "/v1/issue") {
       sendJson(response, 404, { error: "not_found" });
       return;
@@ -721,6 +730,56 @@ export function createIssuerServer({ config, issueCertificate = (csr) => request
   });
 }
 
+export async function ensureInfrastructureDns(config) {
+  if (!config.cfZoneId || !config.cfDnsApiToken) {
+    return { skipped: "no_cf_credentials" };
+  }
+  const records = await cloudflareRequest(config, "GET", `/zones/${config.cfZoneId}/dns_records?per_page=100`);
+  const actions = [];
+
+  const wildcardName = `*.${config.domainSuffix}`;
+  const hasWildcard = records.some((r) => r.type === "A" && (r.name === wildcardName || r.name === `*.car`));
+  if (!hasWildcard) {
+    actions.push(`Created wildcard ${wildcardName} -> 100.99.9.9`);
+    await cloudflareRequest(config, "POST", `/zones/${config.cfZoneId}/dns_records`, {
+      type: "A",
+      name: wildcardName,
+      content: "100.99.9.9",
+      ttl: 120,
+      proxied: false,
+    });
+  }
+
+  const hasBase = records.some((r) => r.type === "A" && r.name === config.domainSuffix);
+  if (!hasBase) {
+    actions.push(`Created base ${config.domainSuffix} -> 100.99.9.9`);
+    await cloudflareRequest(config, "POST", `/zones/${config.cfZoneId}/dns_records`, {
+      type: "A",
+      name: config.domainSuffix,
+      content: "100.99.9.9",
+      ttl: 120,
+      proxied: false,
+    });
+  }
+
+  const hasCaa = records.some((r) => r.type === "CAA" && r.data?.value?.includes("letsencrypt.org"));
+  if (!hasCaa) {
+    actions.push(`Created CAA for ${config.cfZoneName} -> letsencrypt.org`);
+    await cloudflareRequest(config, "POST", `/zones/${config.cfZoneId}/dns_records`, {
+      type: "CAA",
+      name: config.cfZoneName,
+      data: {
+        flags: 0,
+        tag: "issue",
+        value: "letsencrypt.org",
+      },
+      ttl: 120,
+    });
+  }
+
+  return actions;
+}
+
 export function startServer(env = process.env) {
   const config = readConfig(env);
   const server = createIssuerServer({ config });
@@ -728,6 +787,9 @@ export function startServer(env = process.env) {
     console.log(`Certificate issuer listening on ${config.host}:${config.port}`);
     console.log(`ACME directory: ${config.acmeDirectoryUrl}`);
     console.log(`Certificate names: <public-key-fingerprint>.${config.domainSuffix}`);
+    ensureInfrastructureDns(config).then((acts) => {
+      if (acts.length) console.log("Infrastructure DNS configured:", acts);
+    }).catch((e) => console.error("Infrastructure DNS warning:", e.message));
   });
   return server;
 }
