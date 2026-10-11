@@ -730,7 +730,7 @@ export function createIssuerServer({ config, issueCertificate = (csr) => request
         const pair = await Keypairs.generate({ kty: "EC", format: "jwk" });
         const csrDer = await CSR.csr({
           jwk: pair.private,
-          domains: [`*.${config.domainSuffix}`, config.domainSuffix],
+          domains: [`*.${config.domainSuffix}`],
           encoding: "der",
         });
         const issued = await issueNewCertificate(config, csrDer, `*.${config.domainSuffix}`);
