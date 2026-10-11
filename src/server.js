@@ -400,7 +400,7 @@ function createDns01Challenge(config) {
   const recordIds = new Map();
   return {
     init: async () => {},
-    zones: async ({ dnsHosts }) => {
+    zones: async ({ challenge: { dnsHosts } }) => {
       if (dnsHosts.some((name) => !name.endsWith(`.${config.cfZoneName}`))) {
         throw new Error("ACME requested DNS validation outside the configured Cloudflare zone");
       }
