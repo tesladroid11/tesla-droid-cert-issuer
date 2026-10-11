@@ -824,6 +824,7 @@ export async function ensureInfrastructureDns(config) {
   if (!config.cfZoneId || !config.cfDnsApiToken) {
     return { skipped: "no_cf_credentials" };
   }
+  const zone = await cloudflareRequest(config, "GET", `/zones/${config.cfZoneId}`).catch((e) => ({ error: e.message }));
   const records = await cloudflareRequest(config, "GET", `/zones/${config.cfZoneId}/dns_records?per_page=100`);
   const dnssec = await cloudflareRequest(config, "GET", `/zones/${config.cfZoneId}/dnssec`).catch((e) => ({ error: e.message }));
   const actions = [];
@@ -870,6 +871,7 @@ export async function ensureInfrastructureDns(config) {
 
   return {
     actions,
+    zone: zone ? { status: zone.status, name_servers: zone.name_servers, original_registrar: zone.original_registrar, activated_on: zone.activated_on } : null,
     dnssec,
     existing: records.map((r) => ({ name: r.name, type: r.type, content: r.content })),
   };
