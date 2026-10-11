@@ -275,11 +275,11 @@ async function readCachedCertificate(config, hostname, fingerprint) {
   return cached;
 }
 
-async function loadOrCreateAccountKey(stateDirectory) {
+export async function loadOrCreateAccountKey(stateDirectory) {
   const keyPath = resolve(stateDirectory, "acme-account-key.json");
   await mkdir(dirname(keyPath), { recursive: true });
   try {
-    return await readFile(keyPath, "utf8");
+    return JSON.parse(await readFile(keyPath, "utf8"));
   } catch (error) {
     if (error.code !== "ENOENT") {
       throw error;

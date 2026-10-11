@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { once } from "node:events";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import * as asn1js from "asn1js";
-import { createIssuerServer, validateCsr } from "../src/server.js";
+import { createIssuerServer, loadOrCreateAccountKey, validateCsr } from "../src/server.js";
 
 const acmeCsr = createRequire(import.meta.url)("@root/csr");
 
@@ -104,6 +107,17 @@ test("rejects a signed CSR whose name does not match its public key", () => {
     () => validateCsr(csr, "car.tesla-droid.app"),
     /CSR name must match/,
   );
+});
+
+test("loads a persisted ACME account key from JSON", async (t) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "issuer-account-key-"));
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
+
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const accountKey = privateKey.export({ format: "jwk" });
+  await writeFile(join(stateDirectory, "acme-account-key.json"), JSON.stringify(accountKey));
+
+  assert.deepEqual(await loadOrCreateAccountKey(stateDirectory), accountKey);
 });
 
 test("serves health and rejects malformed requests without issuing certificates", async (t) => {
