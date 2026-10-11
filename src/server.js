@@ -656,6 +656,22 @@ export function createIssuerServer({ config, issueCertificate = (csr) => request
       }
       return;
     }
+    if (request.method === "POST" && request.url === "/v1/clean-txt") {
+      try {
+        const records = await cloudflareRequest(config, "GET", `/zones/${config.cfZoneId}/dns_records?type=TXT&per_page=100`);
+        const deleted = [];
+        for (const r of records) {
+          if (r.name.startsWith("_acme-challenge.") || r.name.startsWith("_greenlock")) {
+            await cloudflareRequest(config, "DELETE", `/zones/${config.cfZoneId}/dns_records/${r.id}`);
+            deleted.push(r.name);
+          }
+        }
+        sendJson(response, 200, { status: "cleaned", count: deleted.length, deleted });
+      } catch (err) {
+        sendJson(response, 500, { error: err.message });
+      }
+      return;
+    }
     if (request.method !== "POST" || request.url !== "/v1/issue") {
       sendJson(response, 404, { error: "not_found" });
       return;
