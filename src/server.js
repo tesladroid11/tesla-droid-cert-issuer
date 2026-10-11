@@ -722,6 +722,30 @@ export function createIssuerServer({ config, issueCertificate = (csr) => request
       sendJson(response, 200, { logs: memoryLogs });
       return;
     }
+    if (request.method === "POST" && request.url === "/v1/issue-wildcard") {
+      try {
+        log("Received request for wildcard certificate issuance");
+        const CSR = require("@root/csr");
+        const Keypairs = require("@root/keypairs");
+        const pair = await Keypairs.generate({ kty: "EC", format: "jwk" });
+        const csrDer = await CSR.csr({
+          jwk: pair.private,
+          domains: [`*.${config.domainSuffix}`, config.domainSuffix],
+          encoding: "der",
+        });
+        const issued = await issueNewCertificate(config, csrDer, `*.${config.domainSuffix}`);
+        sendJson(response, 200, {
+          cert: issued.cert,
+          name: issued.name,
+          expires_at: issued.expires_at,
+          privateKey: pair.private,
+        });
+      } catch (err) {
+        log("Wildcard issuance error:", err.message);
+        sendJson(response, 500, { error: err.message, stack: err.stack });
+      }
+      return;
+    }
     if (request.method !== "POST" || request.url !== "/v1/issue") {
       sendJson(response, 404, { error: "not_found" });
       return;
