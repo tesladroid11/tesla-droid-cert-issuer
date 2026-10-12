@@ -480,11 +480,11 @@ async function readCachedCertificate(config, hostname, fingerprint) {
       !Number.isSafeInteger(cached.expires_at)) {
     throw new Error("Cached certificate record is malformed");
   }
-  // Never return local fallback certificate from cache - always issue a real Let's Encrypt certificate
-  if (cached.cert.includes("TeslaDroid Authority")) {
+  const certificate = new X509Certificate(cached.cert);
+  if (!certificate.issuer.includes("Let's Encrypt")) {
+    log(`Discarding non-Let's Encrypt cached certificate for ${hostname} (issuer: ${certificate.issuer})`);
     return null;
   }
-  const certificate = new X509Certificate(cached.cert);
   if (!certificate.checkHost(hostname) ||
       Math.floor(Date.parse(certificate.validTo) / 1000) !== cached.expires_at) {
     throw new Error("Cached certificate does not match its device identity");
@@ -672,22 +672,7 @@ async function requestCertificate(config, csrPem) {
       inFlightIssuances.set(identity.fingerprint, issuancePromise);
     }
 
-    let issued;
-    try {
-      issued = await Promise.race([
-        issuancePromise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error("ACME_FAST_TIMEOUT")), 12_000)),
-      ]);
-    } catch (error) {
-      log(`ACME primary wait: ${error.message}`);
-    }
-
-    if (!issued) {
-      log(`Issuing instant local authority certificate for ${identity.hostname} to prevent client timeout`);
-      issued = generateFallbackCertificate(identity.spkiDer, identity.hostname);
-      return issued;
-    }
-
+    const issued = await issuancePromise;
     return issued;
   });
 }
