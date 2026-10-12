@@ -393,7 +393,9 @@ function readConfig(env) {
 
   return {
     acmeEmail: env.ACME_EMAIL,
-    acmeDirectoryUrl: env.ACME_DIRECTORY_URL || defaultDirectoryUrl,
+    acmeDirectoryUrl: (env.ACME_DIRECTORY_URL && !env.ACME_DIRECTORY_URL.includes("staging"))
+      ? env.ACME_DIRECTORY_URL
+      : defaultDirectoryUrl,
     cfDnsApiToken: env.CF_DNS_API_TOKEN,
     cfZoneId: env.CF_ZONE_ID,
     cfZoneName,
@@ -481,8 +483,8 @@ async function readCachedCertificate(config, hostname, fingerprint) {
     throw new Error("Cached certificate record is malformed");
   }
   const certificate = new X509Certificate(cached.cert);
-  if (!certificate.issuer.includes("Let's Encrypt")) {
-    log(`Discarding non-Let's Encrypt cached certificate for ${hostname} (issuer: ${certificate.issuer})`);
+  if (!certificate.issuer.includes("Let's Encrypt") || certificate.issuer.includes("STAGING")) {
+    log(`Discarding non-production / staging cached certificate for ${hostname} (issuer: ${certificate.issuer})`);
     return null;
   }
   if (!certificate.checkHost(hostname) ||
@@ -492,8 +494,10 @@ async function readCachedCertificate(config, hostname, fingerprint) {
   return cached;
 }
 
-export async function loadOrCreateAccountKey(stateDirectory) {
-  const keyPath = resolve(stateDirectory, "acme-account-key.json");
+export async function loadOrCreateAccountKey(stateDirectory, acmeDirectoryUrl = "") {
+  const isStaging = typeof acmeDirectoryUrl === "string" && acmeDirectoryUrl.includes("staging");
+  const keyFilename = isStaging ? "acme-account-key-staging.json" : (acmeDirectoryUrl ? "acme-account-key-prod.json" : "acme-account-key.json");
+  const keyPath = resolve(stateDirectory, keyFilename);
   await mkdir(dirname(keyPath), { recursive: true });
   try {
     return JSON.parse(await readFile(keyPath, "utf8"));
@@ -678,7 +682,7 @@ async function requestCertificate(config, csrPem) {
 }
 
 async function issueNewCertificate(config, csrDer, hostname) {
-  const accountKey = await loadOrCreateAccountKey(config.stateDirectory);
+  const accountKey = await loadOrCreateAccountKey(config.stateDirectory, config.acmeDirectoryUrl);
   const acme = ACME.create({
     maintainerEmail: config.acmeEmail,
     packageAgent: `tesla-droid-cert-issuer/${issuerVersion}`,
