@@ -19,7 +19,7 @@ const defaultDirectoryUrl = "https://acme-v02.api.letsencrypt.org/directory";
 const maxBodyBytes = 16 * 1024;
 const rateLimitWindowMs = 60 * 60 * 1000;
 const certificateLimitWindowMs = 7 * 24 * 60 * 60 * 1000;
-const maxRequestsPerWindow = 5;
+const maxRequestsPerWindow = 60;
 const maxCertificatesPerWeek = 40;
 const orderNotReadyRetryDelaysMs = [3000, 7000];
 const issuerVersion = "0.1.0";
@@ -32,9 +32,81 @@ function log(...args) {
   if (memoryLogs.length > 200) memoryLogs.shift();
 }
 
-const originalPollOrderStatus = ACME._pollOrderStatus;
-ACME._pollOrderStatus = function (me, options, kid, order, verifieds) {
-  return retryOrderNotReady(() => originalPollOrderStatus.call(this, me, options, kid, order, verifieds));
+ACME._pollOrderStatus = async function (me, options, kid, order, verifieds) {
+  const csr64 = ACME._csrToUrlBase64(options.csr);
+  const payload = JSON.stringify({ csr: csr64 });
+  const orderUrl = order._orderUrl;
+  const finalizeUrl = order._finalizeUrl;
+
+  const maxAttempts = 30;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      await ACME._wait(me.retryInterval || 1500);
+    }
+
+    // RFC 8555 Section 7.4: poll the order resource via POST-as-GET
+    let orderBody;
+    try {
+      const resp = await U._jwsRequest(me, {
+        accountKey: options.accountKey,
+        url: orderUrl,
+        protected: { kid },
+        payload: Enc.binToBuf(""),
+      });
+      orderBody = resp.body;
+      ACME._notify(me, options, "certificate_status", {
+        subject: options.domains[0],
+        status: orderBody?.status,
+      });
+    } catch (err) {
+      log(`Failed to fetch order status (attempt ${attempt}): ${err.message}`);
+      continue;
+    }
+
+    if (orderBody?.status === "valid" && orderBody.certificate) {
+      const voucher = orderBody;
+      voucher._certificateUrl = orderBody.certificate;
+      return voucher;
+    }
+
+    if (orderBody?.status === "invalid") {
+      throw new Error(`[ACME.js] Order became invalid: ${JSON.stringify(orderBody)}`);
+    }
+
+    if (orderBody?.status === "processing") {
+      continue;
+    }
+
+    if (orderBody?.status === "ready") {
+      try {
+        const finalizeResp = await U._jwsRequest(me, {
+          accountKey: options.accountKey,
+          url: finalizeUrl,
+          protected: { kid },
+          payload: Enc.strToBuf(payload),
+        });
+        const finBody = finalizeResp.body;
+        ACME._notify(me, options, "certificate_status", {
+          subject: options.domains[0],
+          status: finBody?.status,
+        });
+        if (finBody?.status === "valid" && finBody.certificate) {
+          const voucher = finBody;
+          voucher._certificateUrl = finBody.certificate;
+          return voucher;
+        }
+      } catch (err) {
+        log(`Finalize request error (attempt ${attempt}): ${err.message || err.detail}`);
+      }
+      continue;
+    }
+
+    if (orderBody?.status === "pending") {
+      continue;
+    }
+  }
+
+  throw new Error(`[ACME.js] Timed out waiting for order finalization at ${orderUrl}`);
 };
 
 ACME._postChallenge = function (me, options, kid, auth) {
@@ -408,6 +480,10 @@ async function readCachedCertificate(config, hostname, fingerprint) {
       !Number.isSafeInteger(cached.expires_at)) {
     throw new Error("Cached certificate record is malformed");
   }
+  // Never return local fallback certificate from cache - always issue a real Let's Encrypt certificate
+  if (cached.cert.includes("TeslaDroid Authority")) {
+    return null;
+  }
   const certificate = new X509Certificate(cached.cert);
   if (!certificate.checkHost(hostname) ||
       Math.floor(Date.parse(certificate.validTo) / 1000) !== cached.expires_at) {
@@ -452,36 +528,7 @@ export async function loadOrCreateAccountKey(stateDirectory) {
   }
 }
 
-async function requestCertificate(config, csrPem) {
-  const identity = validateCsr(csrPem, config.domainSuffix);
-  return serializeIssuance(async () => {
-    const cached = await readCachedCertificate(config, identity.hostname, identity.fingerprint);
-    const now = Date.now();
-    if (cached && cached.expires_at * 1000 > now + 14 * 24 * 60 * 60 * 1000) {
-      return cached;
-    }
-
-    const quotaPath = resolve(config.stateDirectory, "issuance-history.json");
-    let history;
-    try {
-      history = JSON.parse(await readFile(quotaPath, "utf8"));
-    } catch (error) {
-      if (error.code !== "ENOENT") {
-        throw error;
-      }
-      history = [];
-    }
-    if (!Array.isArray(history) || history.some((entry) => !Number.isSafeInteger(entry))) {
-      throw new Error("Certificate issuance history is malformed");
-    }
-    history = history.filter((timestamp) => now - timestamp < certificateLimitWindowMs);
-    if (history.length >= config.maxCertificatesPerWeek) {
-      throw Object.assign(new Error("The configured weekly certificate limit has been reached"), {
-        statusCode: 429,
-      });
-    }
-    history.push(now);
-    await writeJsonAtomically(quotaPath, history);
+const inFlightIssuances = new Map();
 
 function generateFallbackCertificate(spkiDer, hostname) {
   const caKey = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
@@ -570,32 +617,77 @@ function generateFallbackCertificate(spkiDer, hostname) {
   };
 }
 
-    let issued;
-    try {
-      issued = await Promise.race([
-        issueNewCertificate(config, identity.csrDer, identity.hostname),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("ACME_FAST_TIMEOUT")), 7_000)),
-      ]);
-    } catch (error) {
-      log(`ACME primary issuance attempt: ${error.message}`);
+async function requestCertificate(config, csrPem) {
+  const identity = validateCsr(csrPem, config.domainSuffix);
+  return serializeIssuance(async () => {
+    const cached = await readCachedCertificate(config, identity.hostname, identity.fingerprint);
+    const now = Date.now();
+    if (cached && cached.expires_at * 1000 > now + 14 * 24 * 60 * 60 * 1000) {
+      return cached;
     }
-    if (!issued) {
-      history.pop();
-      await writeJsonAtomically(quotaPath, history);
-      log(`Issuing instant local authority certificate for ${identity.hostname} to prevent client timeout`);
-      issued = generateFallbackCertificate(identity.spkiDer, identity.hostname);
 
-      issueNewCertificate(config, identity.csrDer, identity.hostname)
+    const quotaPath = resolve(config.stateDirectory, "issuance-history.json");
+    let history;
+    try {
+      history = JSON.parse(await readFile(quotaPath, "utf8"));
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+      history = [];
+    }
+    if (!Array.isArray(history) || history.some((entry) => !Number.isSafeInteger(entry))) {
+      throw new Error("Certificate issuance history is malformed");
+    }
+    history = history.filter((timestamp) => now - timestamp < certificateLimitWindowMs);
+    if (history.length >= config.maxCertificatesPerWeek) {
+      throw Object.assign(new Error("The configured weekly certificate limit has been reached"), {
+        statusCode: 429,
+      });
+    }
+
+    let issuancePromise = inFlightIssuances.get(identity.fingerprint);
+    if (!issuancePromise) {
+      history.push(now);
+      await writeJsonAtomically(quotaPath, history);
+
+      issuancePromise = issueNewCertificate(config, identity.csrDer, identity.hostname)
         .then(async (acmeCert) => {
           const cachePath = resolve(config.stateDirectory, "certificates", `${identity.fingerprint}.json`);
           await writeJsonAtomically(cachePath, acmeCert);
-          log(`Background Let's Encrypt certificate cached for ${identity.hostname}`);
+          log(`Let's Encrypt certificate cached for ${identity.hostname}`);
+          return acmeCert;
         })
-        .catch((e) => log(`Background Let's Encrypt attempt for ${identity.hostname}: ${e.message}`));
+        .catch(async (e) => {
+          try {
+            history.pop();
+            await writeJsonAtomically(quotaPath, history);
+          } catch {}
+          log(`Let's Encrypt issuance failed for ${identity.hostname}: ${e.message}`);
+          throw e;
+        })
+        .finally(() => {
+          inFlightIssuances.delete(identity.fingerprint);
+        });
+      inFlightIssuances.set(identity.fingerprint, issuancePromise);
     }
 
-    const cachePath = resolve(config.stateDirectory, "certificates", `${identity.fingerprint}.json`);
-    await writeJsonAtomically(cachePath, issued);
+    let issued;
+    try {
+      issued = await Promise.race([
+        issuancePromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("ACME_FAST_TIMEOUT")), 12_000)),
+      ]);
+    } catch (error) {
+      log(`ACME primary wait: ${error.message}`);
+    }
+
+    if (!issued) {
+      log(`Issuing instant local authority certificate for ${identity.hostname} to prevent client timeout`);
+      issued = generateFallbackCertificate(identity.spkiDer, identity.hostname);
+      return issued;
+    }
+
     return issued;
   });
 }
